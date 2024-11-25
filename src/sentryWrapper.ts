@@ -3,12 +3,12 @@ import { NodeClientOptions } from "@sentry/node/build/types/types";
 import { TransportWrapper } from "./transportWrapper";
 
 export class SentryWrapper {
-    private traceMap : Map<string, []>;
+    private spanMap : Map<string, []>;
     private client : NodeClient | undefined
 
     constructor(options: NodeClientOptions){
         const transportWrapper = new TransportWrapper(this);
-        this.traceMap = new Map();
+        this.spanMap = new Map();
         this.client = init({
             ...options,
             transport: transportWrapper.getTransport()
@@ -19,32 +19,32 @@ export class SentryWrapper {
     }
 
     public onSpanEnd(span: any){
-        const activeSpan = getActiveSpan();
-        const traceMap = this.getTraceMap();
-
-        if (activeSpan) {
-            const context = activeSpan.spanContext();
-            const traceID = context.traceId;
-
-            if (traceID) {
+        const spanMap = this.getSpanMap();
+        if (span) {
+            const parentID = span["parentSpanId"] ?? null;
+            if (parentID) {
                 let spans = [];
-                if (traceMap.has(traceID)) {
-                    spans = traceMap.get(traceID);
-                }  
-                
+                if (spanMap.has(parentID)) {
+                    spans = spanMap.get(parentID);
+                }
+
                 spans.push(span);
-                traceMap.set(traceID, spans);
+                this.setMapValue(parentID, spans);
             }
         }
     }   
 
-    public getTraceMap(): Map<any, any> {
-        return this.traceMap;
+    public getSpanMap(): Map<any, any> {
+        return this.spanMap;
     }
 
-    public getSpansByTraceID(traceID: string) : [] {
-        for (const [key, value] of this.traceMap.entries()) {
-            if (key == traceID) {
+    public setMapValue(key: any, value: any) {
+        this.spanMap.set(key, value);
+    }
+
+    public getChildSpans(parentID: string) : [] {
+        for (const [key, value] of this.spanMap.entries()) {
+            if (key == parentID) {
                 return value;
             }
         }

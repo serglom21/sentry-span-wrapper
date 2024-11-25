@@ -14,12 +14,7 @@ import { getSpanData } from "./spanExporter";
 function normalizedSpanForTrace(spans: []) {
   let normalizedSpans = [];
   //console.log(spans)
-  let print = 0;
   for (let span of spans) {
-    if (print < 2) {
-      console.log(span);
-      print++;
-    }
     try {
       normalizedSpans.push(normalizeSpan(span));
     } catch (error) {
@@ -75,28 +70,26 @@ export function extractTraceContext(jsonString: any) : TraceContextObject | null
       return null;
 }
 
-export function replaceTraceID(event: string, trace_id: number, parent_span_id: number) {
+export function replaceParentSpanID(event: string, parent_span_id: number | null) {
     const lines = event.split('\n');
     let jsonString = '';
-    for (const line of lines) {
+    for (const [index, line] of lines.entries()) {
       const jsonData = JSON.parse(line);
-      if (jsonData.trace) {
-        jsonData.trace.trace_id = trace_id;
-      }
 
       if (jsonData.contexts && jsonData.contexts.trace) {
-        jsonData.contexts.trace.trace_id = trace_id;
         jsonData.contexts.trace.span_id = parent_span_id;
       }
 
       if (jsonData.spans) {
         for (let span of jsonData.spans) {
-          span.trace_id = trace_id;
           span.parent_span_id = parent_span_id;
         }
       }
 
-      jsonString +=  JSON.stringify(jsonData) + '\n';
+      jsonString +=  JSON.stringify(jsonData);
+      if (index < lines.length-1) {
+        jsonString += '\n';
+      }
     }
 
     return jsonString;
@@ -137,3 +130,30 @@ export function correctSpansForTrace(event: any, spans: [], numOfSpansExceeded: 
     }
     return { newTrace, currentTrace }
   }
+
+export function createEnvelopeFromBatch(batch: any, event: any) {
+  const spans = normalizedSpanForTrace(batch);
+  let envelope = '';
+  const lines = event.split('\n');
+  for (let line of lines) {
+    const jsonData = JSON.parse(line);
+    if (!jsonData.contexts) {
+      if (jsonData.event_id) {
+        delete jsonData.event_id;
+        line = JSON.stringify(jsonData)
+      }
+      envelope += `${line}\n`;
+    } else {
+      let contextObject : any = {}
+      for (const property in jsonData){
+        if (property == "spans") {
+          contextObject[property] = spans;
+        } else if (!["event_id", "breadcrumbs", "request", "modules"].includes(property)) {
+          contextObject[property] = jsonData[property];
+        }
+      }
+      envelope += JSON.stringify(contextObject);
+    }
+  }
+  return envelope;
+}

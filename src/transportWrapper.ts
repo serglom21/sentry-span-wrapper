@@ -2,14 +2,14 @@ import { NodeTransportOptions } from "@sentry/node/build/types/transports";
 import { SentryWrapper } from "./sentryWrapper";
 import { Transport, TransportMakeRequestResponse, TransportRequest } from "@sentry/types";
 import { createTransport, getCurrentScope, startNewTrace } from "@sentry/node";
-import { correctSpansForTrace, extractTraceContext, replaceTraceID } from "./utils/trace";
+import { createEnvelopeFromBatch, extractTraceContext, replaceParentSpanID } from "./utils/trace";
 import { sendEventPayload } from "./utils/request";
 import { suppressTracing } from "@sentry/core";
 import { NormalizedTraces } from "./types";
 import { rejectedSyncPromise } from "@sentry/utils";
 import * as fs from 'fs';
 
-const SPAN_TRACKING_SERVICE_URL = "http://localhost:4000/collect-spans";
+const SPAN_LIMIT = 1000;
 
 export class TransportWrapper {
     private sentryWrapper : SentryWrapper;
@@ -35,99 +35,55 @@ export class TransportWrapper {
 
         function makeRequest(request: TransportRequest): PromiseLike<TransportMakeRequestResponse>{
             const contexts = extractTraceContext(request.body);
-            if (contexts == null || !SPAN_TRACKING_SERVICE_URL) {
+            if (contexts == null || contexts.type !== "transaction") {
                 return sendEventPayload(
                     options.url,
                     getRequestOptions(request.body, options.headers)
                 )
             }
-
-            const traceSpans = self.sentryWrapper.getSpansByTraceID(contexts.traceContext.trace_id);
             
-            const requestOptions = getRequestOptions(
-                JSON.stringify({
-                    traceId: contexts.traceContext.trace_id,
-                    numOfSpans: traceSpans?.length
-                }),
-                {
-                    'Content-Type': 'application/json',
-                    ...options.headers
-                }
-            )
+            const traceSpans = self.sentryWrapper.getChildSpans(contexts.traceContext.span_id);
 
             try {
-                //return suppressTracing(() => {
-                    return fetch(SPAN_TRACKING_SERVICE_URL, requestOptions).then(response => {
-                        return response.json().then(jsonResponse => {
-                            if (!jsonResponse.spanLimitReached) {
-                                try {
-                                    fs.writeFileSync('./output.json', request.body);
-                                    console.log('content written succesfully')
-                                    // file written successfully
-                                  } catch (err) {
-                                    console.error(err);
-                                  }
-                                return sendEventPayload(
-                                    options.url, 
-                                    getRequestOptions(request.body, options.headers)
-                                ) as PromiseLike<TransportMakeRequestResponse>;
-                            } else {
-                                console.log("span limit reached");
-                                try {
-                                    let traces : NormalizedTraces = {
-                                        currentTrace: '',
-                                        newTrace: ''
-                                    };
-                                    if (jsonResponse.numOfSpansExceeded > 0) {
-                                        traces = correctSpansForTrace(
-                                            request.body,
-                                            traceSpans,
-                                            jsonResponse.numOfSpansExceeded
-                                        );
-                                        //console.log(traces);
-
-                                        sendEventPayload(
-                                            options.url,
-                                            getRequestOptions(traces.currentTrace, options.headers)
-                                        )
-                                    }
-
-                                    let trace_id = null;
-                                    let parent_span_id = null;
-                                    startNewTrace(() => {
-                                        trace_id = getCurrentScope().getPropagationContext().traceId;
-                                        parent_span_id = getCurrentScope().getPropagationContext().spanId;
-                                    })
-                                    console.log("new trace id: ", trace_id)
-
-                                    if (!trace_id || !parent_span_id) {
-                                        throw new Error("Trace ID or Parent Span ID is missing");
-                                    }
-
-                                    const body = replaceTraceID(
-                                        traces.newTrace,
-                                        trace_id,
-                                        parent_span_id
-                                    )
-
-                                    console.log("sending body: ")
-                                    try {
-                                        fs.writeFileSync('./output.json', body);
-                                        console.log('content written succesfully')
-                                        // file written successfully
-                                      } catch (err) {
-                                        console.error(err);
-                                      }
-                                    return sendEventPayload(
+                return suppressTracing(() => {
+                    let requestPayload = {};
+                    requestPayload = getRequestOptions(request.body, options.headers);
+                    if (traceSpans.length <= SPAN_LIMIT) {
+                        return sendEventPayload(
+                            options.url,
+                            requestPayload
+                        ) as PromiseLike<TransportMakeRequestResponse>;
+                    } else {
+                        let spansBatched = 0;
+                        let transactionEnvelope = '';
+                        while (spansBatched < traceSpans.length) {
+                            try {
+                                let batch = traceSpans.slice(spansBatched, spansBatched + SPAN_LIMIT);
+                                spansBatched += batch.length;
+                                let parent_span_id = null;
+                                transactionEnvelope = createEnvelopeFromBatch(batch, request.body);
+                                startNewTrace(() => {
+                                    parent_span_id = getCurrentScope().getPropagationContext().spanId;
+                                })
+                                transactionEnvelope = replaceParentSpanID(transactionEnvelope, parent_span_id)
+                                requestPayload = getRequestOptions(transactionEnvelope, options.headers);
+                                if (spansBatched < traceSpans.length) {
+                                    sendEventPayload(
                                         options.url,
-                                        getRequestOptions(body, options.headers)
-                                    ) as PromiseLike<TransportMakeRequestResponse>;                                ;
-                                } catch (error) {
-                                    console.error(error);
+                                        requestPayload
+                                    );
                                 }
+                            } catch (error) {
+                                console.log(error);
                             }
-                        })
-                    //})
+                        }
+
+                        requestPayload = getRequestOptions(transactionEnvelope, options.headers);
+                        return sendEventPayload(
+                            options.url,
+                            requestPayload
+                        ) as PromiseLike<TransportMakeRequestResponse>;
+                    }
                 }) as PromiseLike<TransportMakeRequestResponse>;
             } catch (error) {
                 console.error(error);
