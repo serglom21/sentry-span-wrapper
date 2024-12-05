@@ -45,7 +45,7 @@ export class TransportWrapper {
             const traceSpans = self.sentryWrapper.getChildSpans(contexts.traceContext.span_id);
 
             try {
-                return suppressTracing(() => {
+                return suppressTracing(async () => {
                     let requestPayload = {};
                     requestPayload = getRequestOptions(request.body, options.headers);
                     if (traceSpans.length <= SPAN_LIMIT) {
@@ -68,7 +68,7 @@ export class TransportWrapper {
                                 transactionEnvelope = replaceParentSpanID(transactionEnvelope, parent_span_id)
                                 requestPayload = getRequestOptions(transactionEnvelope, options.headers);
                                 if (spansBatched < traceSpans.length) {
-                                    sendEventPayload(
+                                    await sendEventPayload(
                                         options.url,
                                         requestPayload
                                     );
